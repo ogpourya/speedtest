@@ -72,8 +72,8 @@ type model struct {
 
 	phase phase
 
-	dlLive int64
-	upLive int64
+	dlLive *int64
+	upLive *int64
 	dlDone bool
 	upDone bool
 	dlTime time.Time
@@ -102,6 +102,8 @@ func initialModel(server string, doDL, doUP bool, threads int) model {
 		threads: threads,
 		phase:   phaseDownload,
 		spinner: s,
+		dlLive:  new(int64),
+		upLive:  new(int64),
 		dlTime:  time.Now(),
 		upTime:  time.Now(),
 	}
@@ -120,9 +122,9 @@ func (m model) Init() tea.Cmd {
 	testCancel = cancel
 
 	if m.doDL {
-		cmds = append(cmds, runDownloadCmd(ctx, m.server, &m.dlLive, testDuration, m.threads))
+		cmds = append(cmds, runDownloadCmd(ctx, m.server, m.dlLive, testDuration, m.threads))
 	} else if m.doUP {
-		cmds = append(cmds, runUploadCmd(ctx, m.server, &m.upLive, testDuration, m.threads))
+		cmds = append(cmds, runUploadCmd(ctx, m.server, m.upLive, testDuration, m.threads))
 	}
 
 	cmds = append(cmds, tickEvery(time.Second/2))
@@ -161,7 +163,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ctx, cancel := context.WithCancel(context.Background())
 			testCancel = cancel
 			return m, tea.Batch(
-				runUploadCmd(ctx, m.server, &m.upLive, testDuration, m.threads),
+				runUploadCmd(ctx, m.server, m.upLive, testDuration, m.threads),
 				tickEvery(time.Second/2),
 			)
 		}
@@ -203,7 +205,7 @@ func (m model) View() string {
 		} else if m.dlDone {
 			dlLine = fmt.Sprintf("Download: %s", fmtSpeed(m.dlResult))
 		} else {
-			live := speedMbps(atomic.LoadInt64(&m.dlLive), time.Since(m.dlTime))
+			live := speedMbps(atomic.LoadInt64(m.dlLive), time.Since(m.dlTime))
 			dlLine = fmt.Sprintf("%s Download: %s", s, fmtSpeed(live))
 		}
 	}
@@ -214,7 +216,7 @@ func (m model) View() string {
 		} else if m.upDone {
 			upLine = fmt.Sprintf("Upload:   %s", fmtSpeed(m.upResult))
 		} else {
-			live := speedMbps(atomic.LoadInt64(&m.upLive), time.Since(m.upTime))
+			live := speedMbps(atomic.LoadInt64(m.upLive), time.Since(m.upTime))
 			upLine = fmt.Sprintf("%s Upload:   %s", s, fmtSpeed(live))
 		}
 	}
