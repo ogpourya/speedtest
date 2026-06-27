@@ -23,7 +23,6 @@ const (
 	dlPath        = "/downloading"
 	upPath        = "/upload"
 	testDuration  = 12 * time.Second
-	threads       = 6
 	uploadSize    = 30 * 1024 * 1024
 )
 
@@ -31,6 +30,8 @@ var (
 	serverFlag   = flag.String("server", defaultServer, "speed test server URL")
 	downloadFlag = flag.Bool("dl", false, "only test download")
 	uploadFlag   = flag.Bool("up", false, "only test upload")
+	singleFlag   = flag.Bool("single", false, "single connection mode")
+	threadsFlag  = flag.Int("threads", 6, "number of concurrent connections")
 
 	testCancel context.CancelFunc
 )
@@ -41,8 +42,15 @@ func main() {
 	server := *serverFlag
 	doDL := *downloadFlag || (!*downloadFlag && !*uploadFlag)
 	doUP := *uploadFlag || (!*downloadFlag && !*uploadFlag)
+	threads := *threadsFlag
+	if *singleFlag {
+		threads = 1
+	}
+	if threads < 1 {
+		threads = 1
+	}
 
-	p := tea.NewProgram(initialModel(server, doDL, doUP))
+	p := tea.NewProgram(initialModel(server, doDL, doUP, threads))
 	if _, err := p.Run(); err != nil {
 		log.Fatal(err)
 	}
@@ -57,9 +65,10 @@ const (
 )
 
 type model struct {
-	server string
-	doDL   bool
-	doUP   bool
+	server  string
+	doDL    bool
+	doUP    bool
+	threads int
 
 	phase phase
 
@@ -81,7 +90,7 @@ type model struct {
 
 type tickMsg time.Time
 
-func initialModel(server string, doDL, doUP bool) model {
+func initialModel(server string, doDL, doUP bool, threads int) model {
 	s := spinner.New()
 	s.Spinner = spinner.Line
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#c7a0ff"))
@@ -90,6 +99,7 @@ func initialModel(server string, doDL, doUP bool) model {
 		server:  server,
 		doDL:    doDL,
 		doUP:    doUP,
+		threads: threads,
 		phase:   phaseDownload,
 		spinner: s,
 		dlTime:  time.Now(),
@@ -110,9 +120,9 @@ func (m model) Init() tea.Cmd {
 	testCancel = cancel
 
 	if m.doDL {
-		cmds = append(cmds, runDownloadCmd(ctx, m.server, &m.dlLive, testDuration))
+		cmds = append(cmds, runDownloadCmd(ctx, m.server, &m.dlLive, testDuration, m.threads))
 	} else if m.doUP {
-		cmds = append(cmds, runUploadCmd(ctx, m.server, &m.upLive, testDuration))
+		cmds = append(cmds, runUploadCmd(ctx, m.server, &m.upLive, testDuration, m.threads))
 	}
 
 	cmds = append(cmds, tickEvery(time.Second/2))
@@ -151,7 +161,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ctx, cancel := context.WithCancel(context.Background())
 			testCancel = cancel
 			return m, tea.Batch(
-				runUploadCmd(ctx, m.server, &m.upLive, testDuration),
+				runUploadCmd(ctx, m.server, &m.upLive, testDuration, m.threads),
 				tickEvery(time.Second/2),
 			)
 		}
@@ -212,9 +222,9 @@ func (m model) View() string {
 	var status string
 	switch m.phase {
 	case phaseDownload:
-		status = "Testing download speed..."
+		status = fmt.Sprintf("Testing download speed (%d conn)...", m.threads)
 	case phaseUpload:
-		status = "Testing upload speed..."
+		status = fmt.Sprintf("Testing upload speed (%d conn)...", m.threads)
 	case phaseDone:
 		status = "Done!"
 	}
@@ -231,7 +241,7 @@ func (m model) View() string {
 	return content
 }
 
-func runDownloadCmd(ctx context.Context, server string, live *int64, dur time.Duration) tea.Cmd {
+func runDownloadCmd(ctx context.Context, server string, live *int64, dur time.Duration, threads int) tea.Cmd {
 	return func() tea.Msg {
 		tr := &http.Transport{
 			MaxIdleConnsPerHost: threads,
@@ -300,7 +310,7 @@ func runDownloadCmd(ctx context.Context, server string, live *int64, dur time.Du
 	}
 }
 
-func runUploadCmd(ctx context.Context, server string, live *int64, dur time.Duration) tea.Cmd {
+func runUploadCmd(ctx context.Context, server string, live *int64, dur time.Duration, threads int) tea.Cmd {
 	return func() tea.Msg {
 		data := make([]byte, uploadSize)
 		if _, err := rand.Read(data); err != nil {
