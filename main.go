@@ -8,12 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -24,6 +24,7 @@ const (
 	upPath        = "/upload"
 	testDuration  = 12 * time.Second
 	uploadSize    = 30 * 1024 * 1024
+	sparkWidth    = 20
 )
 
 var (
@@ -34,6 +35,16 @@ var (
 	threadsFlag  = flag.Int("threads", 6, "number of concurrent connections")
 
 	testCancel context.CancelFunc
+)
+
+var (
+	accentSty = lipgloss.NewStyle().Foreground(lipgloss.Color("#2EF8BB"))
+	dimSty    = lipgloss.NewStyle().Foreground(lipgloss.Color("#626262"))
+	boldSty   = lipgloss.NewStyle().Bold(true)
+	labelSty  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#2EF8BB"))
+	errSty    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6B6B"))
+	unitSty   = lipgloss.NewStyle().Foreground(lipgloss.Color("#626262"))
+	baseSty   = lipgloss.NewStyle().Padding(1, 2)
 )
 
 func main() {
@@ -84,24 +95,23 @@ type model struct {
 	dlErr    error
 	upErr    error
 
-	spinner spinner.Model
-	ready   bool
+	dlSamples []float64
+	upSamples []float64
+	dlPeak    float64
+	upPeak    float64
+
+	ready bool
 }
 
 type tickMsg time.Time
 
 func initialModel(server string, doDL, doUP bool, threads int) model {
-	s := spinner.New()
-	s.Spinner = spinner.Line
-	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#c7a0ff"))
-
 	m := model{
 		server:  server,
 		doDL:    doDL,
 		doUP:    doUP,
 		threads: threads,
 		phase:   phaseDownload,
-		spinner: s,
 		dlLive:  new(int64),
 		upLive:  new(int64),
 		dlTime:  time.Now(),
@@ -116,10 +126,10 @@ func initialModel(server string, doDL, doUP bool, threads int) model {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.spinner.Tick}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	testCancel = cancel
+
+	cmds := []tea.Cmd{tickEvery(200 * time.Millisecond)}
 
 	if m.doDL {
 		cmds = append(cmds, runDownloadCmd(ctx, m.server, m.dlLive, testDuration, m.threads))
@@ -127,7 +137,6 @@ func (m model) Init() tea.Cmd {
 		cmds = append(cmds, runUploadCmd(ctx, m.server, m.upLive, testDuration, m.threads))
 	}
 
-	cmds = append(cmds, tickEvery(time.Second/2))
 	return tea.Batch(cmds...)
 }
 
@@ -145,26 +154,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
-	case spinner.TickMsg:
-		var cmd tea.Cmd
-		m.spinner, cmd = m.spinner.Update(msg)
-		return m, cmd
-
 	case tickMsg:
-		return m, tickEvery(time.Second / 2)
+		if !m.dlDone && m.doDL {
+			speed := speedMbps(atomic.LoadInt64(m.dlLive), time.Since(m.dlTime))
+			m.dlSamples = append(m.dlSamples, speed)
+			if speed > m.dlPeak {
+				m.dlPeak = speed
+			}
+		}
+		if !m.upDone && m.doUP {
+			speed := speedMbps(atomic.LoadInt64(m.upLive), time.Since(m.upTime))
+			m.upSamples = append(m.upSamples, speed)
+			if speed > m.upPeak {
+				m.upPeak = speed
+			}
+		}
+		return m, tickEvery(200 * time.Millisecond)
 
 	case dlDoneMsg:
 		m.dlResult = msg.speed
 		m.dlErr = msg.err
 		m.dlDone = true
+		if msg.speed > m.dlPeak {
+			m.dlPeak = msg.speed
+		}
 
 		if m.doUP {
 			m.phase = phaseUpload
+			m.upTime = time.Now()
 			ctx, cancel := context.WithCancel(context.Background())
 			testCancel = cancel
 			return m, tea.Batch(
 				runUploadCmd(ctx, m.server, m.upLive, testDuration, m.threads),
-				tickEvery(time.Second/2),
+				tickEvery(200*time.Millisecond),
 			)
 		}
 		m.phase = phaseDone
@@ -174,6 +196,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.upResult = msg.speed
 		m.upErr = msg.err
 		m.upDone = true
+		if msg.speed > m.upPeak {
+			m.upPeak = msg.speed
+		}
 		m.phase = phaseDone
 		return m, tea.Quit
 	}
@@ -195,52 +220,98 @@ func (m model) View() string {
 		return ""
 	}
 
-	s := m.spinner.View()
-
-	var dlLine, upLine string
+	var lines []string
 
 	if m.doDL {
-		if m.dlErr != nil {
-			dlLine = fmt.Sprintf("Download: error (%v)", m.dlErr)
-		} else if m.dlDone {
-			dlLine = fmt.Sprintf("Download: %s", fmtSpeed(m.dlResult))
+		var spd float64
+		if m.dlDone {
+			spd = m.dlResult
 		} else {
-			live := speedMbps(atomic.LoadInt64(m.dlLive), time.Since(m.dlTime))
-			dlLine = fmt.Sprintf("%s Download: %s", s, fmtSpeed(live))
+			spd = speedMbps(atomic.LoadInt64(m.dlLive), time.Since(m.dlTime))
 		}
+		lines = append(lines, testLine("Download", m.dlSamples, spd, m.dlPeak, m.dlErr))
 	}
 
 	if m.doUP {
-		if m.upErr != nil {
-			upLine = fmt.Sprintf("Upload:   error (%v)", m.upErr)
-		} else if m.upDone {
-			upLine = fmt.Sprintf("Upload:   %s", fmtSpeed(m.upResult))
+		var spd float64
+		if m.upDone {
+			spd = m.upResult
 		} else {
-			live := speedMbps(atomic.LoadInt64(m.upLive), time.Since(m.upTime))
-			upLine = fmt.Sprintf("%s Upload:   %s", s, fmtSpeed(live))
+			spd = speedMbps(atomic.LoadInt64(m.upLive), time.Since(m.upTime))
+		}
+		lines = append(lines, testLine("Upload", m.upSamples, spd, m.upPeak, m.upErr))
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
+
+	if m.phase != phaseDone {
+		content += "\n" + dimSty.Render("q: quit")
+	}
+
+	return baseSty.Render(content)
+}
+
+func testLine(name string, samples []float64, speed, peak float64, testErr error) string {
+	if testErr != nil {
+		return fmt.Sprintf("%s %s",
+			labelSty.Render(fmt.Sprintf("%-8s", name)),
+			errSty.Render(fmt.Sprintf("error (%v)", testErr)),
+		)
+	}
+
+	label := labelSty.Render(fmt.Sprintf("%-8s", name))
+
+	spark := accentSty.Render(sparkline(samples, sparkWidth))
+
+	speedNum := boldSty.Render(fmt.Sprintf("%8.1f", speed))
+	speedUnit := unitSty.Render(fmtSpeed(speed, true))
+	speedStr := speedNum + speedUnit
+
+	var peakStr string
+	if peak > 0 {
+		p := boldSty.Render(fmt.Sprintf("%5.1f", peak))
+		u := unitSty.Render(fmtSpeed(peak, true))
+		peakStr = dimSty.Render(" peak ") + p + u
+	}
+
+	return fmt.Sprintf("%s %s  %s%s", label, spark, speedStr, peakStr)
+}
+
+func sparkline(data []float64, width int) string {
+	if len(data) == 0 || width == 0 {
+		return ""
+	}
+
+	bars := []rune("▁▂▃▄▅▆▇█")
+	maxVal := 0.0
+	for _, v := range data {
+		if v > maxVal {
+			maxVal = v
 		}
 	}
-
-	var status string
-	switch m.phase {
-	case phaseDownload:
-		status = fmt.Sprintf("Testing download speed (%d conn)...", m.threads)
-	case phaseUpload:
-		status = fmt.Sprintf("Testing upload speed (%d conn)...", m.threads)
-	case phaseDone:
-		status = "Done!"
+	if maxVal == 0 {
+		maxVal = 1
 	}
 
-	content := lipgloss.NewStyle().Padding(0, 1).Render(status)
-	if dlLine != "" {
-		content += "\n" + dlLine
-	}
-	if upLine != "" {
-		content += "\n" + upLine
-	}
-	content += "\n\nPress q to quit"
+	n := len(data)
+	runes := make([]rune, width)
 
-	return content
+	for i := range width {
+		idx := i * n / width
+		if idx >= n {
+			idx = n - 1
+		}
+		level := int(math.Round(data[idx] / maxVal * 7))
+		if level < 0 {
+			level = 0
+		}
+		if level > 7 {
+			level = 7
+		}
+		runes[i] = bars[level]
+	}
+
+	return string(runes)
 }
 
 func runDownloadCmd(ctx context.Context, server string, live *int64, dur time.Duration, threads int) tea.Cmd {
@@ -407,9 +478,15 @@ func speedMbps(total int64, elapsed time.Duration) float64 {
 	return float64(total) * 8 / s / 1_000_000
 }
 
-func fmtSpeed(mbps float64) string {
+func fmtSpeed(mbps float64, short bool) string {
 	if mbps >= 1000 {
+		if short {
+			return " Gbps"
+		}
 		return fmt.Sprintf("%.2f Gbps", mbps/1000)
+	}
+	if short {
+		return " Mbps"
 	}
 	return fmt.Sprintf("%.2f Mbps", mbps)
 }
