@@ -282,7 +282,6 @@ func sparkline(data []float64, width int) string {
 		return ""
 	}
 
-	bars := []rune("▁▂▃▄▅▆▇█")
 	maxVal := 0.0
 	for _, v := range data {
 		if v > maxVal {
@@ -293,22 +292,54 @@ func sparkline(data []float64, width int) string {
 		maxVal = 1
 	}
 
+	cols := width * 2
 	n := len(data)
-	runes := make([]rune, width)
-
-	for i := range width {
-		idx := i * n / width
+	heights := make([]int, cols)
+	for i := range cols {
+		idx := i * n / cols
 		if idx >= n {
 			idx = n - 1
 		}
-		level := int(math.Round(data[idx] / maxVal * 7))
-		if level < 0 {
-			level = 0
+		h := int(math.Round(data[idx] / maxVal * 4))
+		if h < 0 {
+			h = 0
 		}
-		if level > 7 {
-			level = 7
+		if h > 4 {
+			h = 4
 		}
-		runes[i] = bars[level]
+		heights[i] = h
+	}
+
+	runes := make([]rune, width)
+	for i := range width {
+		lh := heights[i*2]
+		rh := heights[i*2+1]
+		var b byte
+		if lh >= 1 {
+			b |= 1 << 6
+		}
+		if lh >= 2 {
+			b |= 1 << 2
+		}
+		if lh >= 3 {
+			b |= 1 << 1
+		}
+		if lh >= 4 {
+			b |= 1 << 0
+		}
+		if rh >= 1 {
+			b |= 1 << 7
+		}
+		if rh >= 2 {
+			b |= 1 << 5
+		}
+		if rh >= 3 {
+			b |= 1 << 4
+		}
+		if rh >= 4 {
+			b |= 1 << 3
+		}
+		runes[i] = rune(0x2800) + rune(b)
 	}
 
 	return string(runes)
